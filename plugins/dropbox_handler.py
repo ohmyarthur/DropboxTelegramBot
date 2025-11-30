@@ -13,13 +13,21 @@ from utils.progress import Progress
 async def dropbox_handler(client: Client, message: Message):
     url = message.text.strip()
     
-    if "?dl=0" in url:
-        url = url.replace("?dl=0", "?dl=1")
-    elif "?dl=1" not in url:
-        if "?" in url:
-            url += "&dl=1"
-        else:
-            url += "?dl=1"
+    if "dropbox.com" in url:
+        if "?dl=0" in url:
+            url = url.replace("?dl=0", "?dl=1")
+        elif "?dl=1" not in url:
+            if "?" in url:
+                url += "&dl=1"
+            else:
+                url += "?dl=1"
+    
+    elif "dl.dropboxusercontent.com" in url:
+        if "?dl=1" not in url:
+            if "?" in url:
+                url += "&dl=1"
+            else:
+                url += "?dl=1"
 
     status_msg = await message.reply_text("Initializing...")
     
