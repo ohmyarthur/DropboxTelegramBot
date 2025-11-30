@@ -3,7 +3,6 @@ import uvloop
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN
 
-# Install uvloop
 uvloop.install()
 
 logging.basicConfig(level=logging.INFO)

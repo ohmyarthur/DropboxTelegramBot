@@ -7,10 +7,12 @@ from pyrogram.types import Message
 from config import DUMP_CHAT_ID, OWNER_ID
 from utils.aerofs_helper import write_stream_to_file
 from utils.zip_helper import extract_zip
+from utils.progress import Progress
 
 @Client.on_message(filters.regex(r"https?://www\.dropbox\.com/.*") & filters.user(OWNER_ID))
 async def dropbox_handler(client: Client, message: Message):
     url = message.text.strip()
+    
     if "?dl=0" in url:
         url = url.replace("?dl=0", "?dl=1")
     elif "?dl=1" not in url:
@@ -19,7 +21,7 @@ async def dropbox_handler(client: Client, message: Message):
         else:
             url += "?dl=1"
 
-    status_msg = await message.reply_text("Downloading from Dropbox...")
+    status_msg = await message.reply_text("Initializing...")
     
     temp_dir = f"downloads/{message.id}"
     os.makedirs(temp_dir, exist_ok=True)
@@ -27,19 +29,28 @@ async def dropbox_handler(client: Client, message: Message):
     extract_path = f"{temp_dir}/extracted"
 
     try:
-        start_time = time.time()
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status != 200:
                     await status_msg.edit_text("Failed to download. Check the link.")
                     return
                 
-                await write_stream_to_file(response.content.iter_chunked(1024*1024), zip_path)
+                total_size = int(response.headers.get('Content-Length', 0))
+                progress = Progress(status_msg, total_size, "Downloading")
+                
+                await write_stream_to_file(
+                    response.content.iter_chunked(1024*1024), 
+                    zip_path, 
+                    progress_callback=lambda current: progress.update(current)
+                )
         
-        download_time = time.time() - start_time
-        await status_msg.edit_text(f"Downloaded in {download_time:.2f}s. Extracting...")
+        await status_msg.edit_text("Download complete. Extracting...")
+        async def extract_progress(current, total):
+            if not hasattr(extract_progress, 'prog'):
+                 extract_progress.prog = Progress(status_msg, total, "Extracting")
+            await extract_progress.prog.update(current)
 
-        await extract_zip(zip_path, extract_path)
+        await extract_zip(zip_path, extract_path, progress_callback=extract_progress)
         
         await status_msg.edit_text("Extracted. Uploading to Dump Channel...")
 
@@ -50,17 +61,20 @@ async def dropbox_handler(client: Client, message: Message):
 
         total_files = len(files)
         uploaded = 0
+        
+        upload_prog = Progress(status_msg, total_files, "Uploading Files")
 
-        for file_path in files:
+        for i, file_path in enumerate(files):
             try:
                 await client.send_document(
                     chat_id=DUMP_CHAT_ID,
                     document=file_path,
-                    caption=f"Backup: {os.path.basename(file_path)}"
+                    caption=f"Backup: {os.path.basename(file_path)}",
+                    progress=lambda current, total: None
                 )
                 uploaded += 1
-                if uploaded % 5 == 0:
-                    await status_msg.edit_text(f"Uploading... {uploaded}/{total_files}")
+                await upload_prog.update(uploaded)
+                
             except Exception as e:
                 print(f"Failed to upload {file_path}: {e}")
 

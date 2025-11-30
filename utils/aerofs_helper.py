@@ -2,10 +2,14 @@ import aerofs
 import os
 import asyncio
 
-async def write_stream_to_file(stream, file_path):
+async def write_stream_to_file(stream, file_path, progress_callback=None):
+    downloaded = 0
     async with aerofs.open(file_path, 'wb') as f:
         async for chunk in stream:
             await f.write(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                await progress_callback(downloaded)
 
 async def read_file_as_stream(file_path, chunk_size=1024*1024):
     async with aerofs.open(file_path, 'rb') as f:
