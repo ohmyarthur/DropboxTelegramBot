@@ -211,22 +211,31 @@ async def dropbox_handler(client: Client, message: Message):
             compressed = False
             
             if ext in IMAGE_FORMATS:
-                compressed_path = f"{file_path}_compressed{ext}"
+                target_ext = ext
+                if ext in ['.heic', '.heif', '.tiff', '.tif', '.bmp']:
+                    target_ext = '.jpg'
+                
+                compressed_path = f"{file_path}_compressed{target_ext}"
                 
                 await status_msg.edit_text(
-                    f"🖼️ Compressing image ({i+1}/{total_files})\n"
+                    f"🖼️ Processing image ({i+1}/{total_files})\n"
                     f"📄 {filename}\n"
                     f"📊 Size: {file_size / (1024*1024):.2f} MB"
                 )
                 
                 if await compress_image(file_path, compressed_path):
                     compressed_size = os.path.getsize(compressed_path)
-                    
-                    if compressed_size < file_size * 0.98:
+                    should_use_compressed = False
+                    if ext in ['.heic', '.heif', '.tiff', '.tif', '.bmp']:
+                        should_use_compressed = True
+                    elif compressed_size < file_size * 0.98:
+                        should_use_compressed = True
+                        
+                    if should_use_compressed:
                         upload_path = compressed_path
                         compressed = True
                         compressed_count += 1
-                        caption = f"🖼️ Backup (Optimized): {filename}"
+                        caption = f"🖼️ Backup (Optimized): {os.path.splitext(filename)[0]}{target_ext}"
             
             elif ext in VIDEO_FORMATS:
                 if file_size > MAX_TELEGRAM_SIZE:
