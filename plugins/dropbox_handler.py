@@ -29,20 +29,23 @@ async def dropbox_handler(client: Client, message: Message):
     extract_path = f"{temp_dir}/extracted"
 
     try:
+        from utils.downloader import SmartDownloader        
+        downloader = SmartDownloader(
+            url, 
+            zip_path, 
+            concurrency=32,
+            progress_callback=lambda current: progress.update(current) if 'progress' in locals() else None
+        )
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    await status_msg.edit_text("Failed to download. Check the link.")
-                    return
-                
+             async with session.head(url, allow_redirects=True) as response:
                 total_size = int(response.headers.get('Content-Length', 0))
-                progress = Progress(status_msg, total_size, "Downloading")
-                
-                await write_stream_to_file(
-                    response.content.iter_chunked(1024*1024), 
-                    zip_path, 
-                    progress_callback=lambda current: progress.update(current)
-                )
+
+        progress = Progress(status_msg, total_size, "Downloading (Multi-stream)")
+        
+        downloader.progress_callback = lambda current: progress.update(current)
+        
+        await downloader.download()
         
         await status_msg.edit_text("Download complete. Extracting...")
         async def extract_progress(current, total):
