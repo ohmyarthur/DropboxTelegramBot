@@ -6,6 +6,7 @@ from config import API_ID, API_HASH, BOT_TOKEN
 uvloop.install()
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
 
 app = Client(
     "backup_bot",

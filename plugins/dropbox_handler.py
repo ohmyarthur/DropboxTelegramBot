@@ -3,7 +3,7 @@ import shutil
 import time
 import aiohttp
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InputMediaPhoto
 from pyrogram.errors import FloodWait
 import asyncio
 from config import DUMP_CHAT_ID, OWNER_ID
@@ -275,6 +275,58 @@ async def dropbox_handler(client: Client, message: Message):
         compressed_count = 0
         upload_prog = Progress(status_msg, total_files, "Processing & Uploading")
 
+        pending_photos = []
+
+        async def flush_album():
+            nonlocal pending_photos, uploaded
+            if not pending_photos:
+                return
+
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
+                try:
+                    media_group = []
+                    for idx, item in enumerate(pending_photos):
+                        media_group.append(
+                            InputMediaPhoto(
+                                media=item["upload_path"],
+                                caption=item["caption"] if idx == 0 else None
+                            )
+                        )
+
+                    await client.send_media_group(
+                        chat_id=DUMP_CHAT_ID,
+                        media=media_group
+                    )
+
+                    uploaded += len(pending_photos)
+                    await upload_prog.update(uploaded)
+                    break
+
+                except FloodWait as e:
+                    print(f"⏳ FloodWait (album): Sleeping {e.value}s...")
+                    await asyncio.sleep(e.value)
+                    retry_count += 1
+
+                except Exception as e:
+                    print(f"❌ Album upload error: {e}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"⚠️ Skipping album after {max_retries} retries")
+                        break
+                    await asyncio.sleep(2)
+
+            for item in pending_photos:
+                if item["compressed"] and os.path.exists(item["upload_path"]) and item["upload_path"] != item["file_path"]:
+                    try:
+                        os.remove(item["upload_path"])
+                    except Exception as e:
+                        print(f"Cleanup error: {e}")
+
+            pending_photos = []
+
         for i, file_path in enumerate(files):
             filename = os.path.basename(file_path)
             ext = os.path.splitext(filename)[1].lower()
@@ -342,19 +394,28 @@ async def dropbox_handler(client: Client, message: Message):
                         )
                         continue
 
+            if ext in IMAGE_FORMATS:
+                pending_photos.append({
+                    "file_path": file_path,
+                    "upload_path": upload_path,
+                    "caption": caption,
+                    "compressed": compressed,
+                })
+
+                if len(pending_photos) >= 10:
+                    await flush_album()
+
+                continue
+
+            if pending_photos:
+                await flush_album()
+
             max_retries = 3
             retry_count = 0
-            
+
             while retry_count < max_retries:
                 try:
-                    if ext in IMAGE_FORMATS:
-                        await client.send_photo(
-                            chat_id=DUMP_CHAT_ID,
-                            photo=upload_path,
-                            caption=caption,
-                            progress=lambda current, total: None
-                        )
-                    elif ext in VIDEO_FORMATS:
+                    if ext in VIDEO_FORMATS:
                         await client.send_video(
                             chat_id=DUMP_CHAT_ID,
                             video=upload_path,
@@ -392,6 +453,9 @@ async def dropbox_handler(client: Client, message: Message):
                     os.remove(upload_path)
                 except Exception as e:
                     print(f"Cleanup error: {e}")
+
+        if pending_photos:
+            await flush_album()
 
         await status_msg.edit_text(
             f"✅ Upload Complete!\n\n"

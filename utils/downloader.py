@@ -66,6 +66,7 @@ class SmartDownloader:
             stderr=asyncio.subprocess.PIPE
         )
         
+        stdout_lines = []
         stderr_lines = []
         
         async def read_stderr():
@@ -84,6 +85,7 @@ class SmartDownloader:
                 
             line = line.decode('utf-8').strip()
             if line:
+                stdout_lines.append(line)
                 if line.startswith("[#") and "/" in line and "(" in line:
                     try:
                         parts = line.split()
@@ -117,14 +119,18 @@ class SmartDownloader:
         
         if self.process.returncode != 0:
             stderr_output = '\n'.join(stderr_lines[-20:]) if stderr_lines else "No error output"
+            stdout_output = '\n'.join(stdout_lines[-20:]) if stdout_lines else "No stdout output"
             error_msg = f"Aria2c failed with code {self.process.returncode}"
             
             if self.process.returncode == 22:
-                error_msg += "\nHTTP Error - Possible causes:"
-                error_msg += "\n- Server rejected the request (403/404)"
+                error_msg += "\nHTTP or URL error - Possible causes:"
+                error_msg += "\n- Server rejected the request (403/404/429)"
                 error_msg += "\n- Invalid or expired download link"
+                error_msg += "\n- Malformed URL or unsupported protocol"
                 error_msg += "\n- Network connectivity issues"
             
+            error_msg += f"\n\nURL: {self.url}"
+            error_msg += f"\n\nRecent stdout output:\n{stdout_output}"
             error_msg += f"\n\nRecent stderr output:\n{stderr_output}"
             raise Exception(error_msg)
             
