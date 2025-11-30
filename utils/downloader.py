@@ -95,7 +95,7 @@ class SmartDownloader:
             self.total_size = os.path.getsize(self.dest_path)
             self.downloaded = self.total_size
             if self.progress_callback:
-                await self.progress_callback(self.total_size)
+                await self.progress_callback(self.total_size, self.total_size)
         else:
             raise Exception("Download finished but file not found")
 
