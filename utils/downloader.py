@@ -62,9 +62,21 @@ class SmartDownloader:
                             if "/" in part and "(" in part:
                                 size_part = part.split("(")[0]
                                 current_str, total_str = size_part.split("/")
-                                pass
-                    except Exception:
-                        pass
+                                
+                                def parse_aria_size(s):
+                                    s = s.upper()
+                                    if s.endswith('KIB'): return float(s[:-3]) * 1024
+                                    if s.endswith('MIB'): return float(s[:-3]) * 1024**2
+                                    if s.endswith('GIB'): return float(s[:-3]) * 1024**3
+                                    if s.endswith('TIB'): return float(s[:-3]) * 1024**4
+                                    if s.endswith('B'): return float(s[:-1])
+                                    return 0.0
+
+                                current = parse_aria_size(current_str)
+                                total = parse_aria_size(total_str)
+                                
+                                if self.progress_callback and total > 0:
+                                    await self.progress_callback(current, total)
             
             if self.process.stdout.at_eof():
                 break

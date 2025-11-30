@@ -10,6 +10,132 @@ from config import DUMP_CHAT_ID, OWNER_ID
 from utils.aerofs_helper import write_stream_to_file
 from utils.zip_helper import extract_zip
 from utils.progress import Progress
+from PIL import Image
+import pillow_heif
+
+pillow_heif.register_heif_opener()
+
+VIDEO_FORMATS = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ts', '.mpg', '.mpeg', '.m2ts', '.mts']
+IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp', '.tiff', '.tif', '.bmp', '.gif']
+MAX_TELEGRAM_SIZE = 1.95 * 1024 * 1024 * 1024
+IMAGE_QUALITY = 85
+VIDEO_CRF_H265 = 24
+
+async def compress_image(input_path: str, output_path: str, max_quality: int = IMAGE_QUALITY) -> bool:
+    try:
+        img = Image.open(input_path)
+        
+        exif_data = img.info.get('exif', None)
+        
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        
+        file_size = os.path.getsize(input_path)
+        
+        if file_size < 500 * 1024:  # < 500KB
+            img.save(output_path, 'PNG', optimize=True)
+        else:
+            save_params = {
+                'format': 'JPEG',
+                'quality': max_quality,
+                'optimize': True,
+                'progressive': True,  # Progressive loading untuk web
+                'subsampling': 0,  # 4:4:4 chroma subsampling untuk quality maksimal
+            }
+            if exif_data:
+                save_params['exif'] = exif_data
+            
+            img.save(output_path, **save_params)
+        
+        if os.path.exists(output_path):
+            original_size = os.path.getsize(input_path)
+            compressed_size = os.path.getsize(output_path)
+            
+            if compressed_size >= original_size * 0.95:
+                shutil.copy2(input_path, output_path)
+            
+            return True
+        return False
+    except Exception as e:
+        print(f"Image compression error: {e}")
+        try:
+            shutil.copy2(input_path, output_path)
+            return True
+        except:
+            return False
+
+async def compress_video_h265(input_path: str, output_path: str, status_msg: Message = None) -> bool:
+
+    try:
+        if status_msg:
+            await status_msg.edit_text(f"🎬 Compressing video with H.265/HEVC (Near-Lossless Quality)...")
+        
+        cmd = [
+            "ffmpeg", "-i", input_path,
+            "-c:v", "libx265",
+            "-crf", str(VIDEO_CRF_H265),
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+            "-tag:v", "hvc1",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-y",
+            output_path
+        ]
+        
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0 and os.path.exists(output_path):
+            output_size = os.path.getsize(output_path)
+            original_size = os.path.getsize(input_path)
+            
+            if output_size < original_size and output_size < MAX_TELEGRAM_SIZE:
+                if status_msg:
+                    reduction = (1 - output_size / original_size) * 100
+                    await status_msg.edit_text(
+                        f"✅ Video compressed successfully!\n"
+                        f"📉 Size reduced by {reduction:.1f}%\n"
+                        f"Original: {original_size / (1024*1024*1024):.2f} GB\n"
+                        f"Compressed: {output_size / (1024*1024*1024):.2f} GB"
+                    )
+                return True
+            else:
+                if output_size >= MAX_TELEGRAM_SIZE:
+                    if status_msg:
+                        await status_msg.edit_text(f"🔄 File still too large, trying higher compression...")
+                    cmd[7] = "28"
+                    
+                    proc2 = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc2.wait()
+                    
+                    if proc2.returncode == 0 and os.path.exists(output_path):
+                        output_size2 = os.path.getsize(output_path)
+                        if output_size2 < MAX_TELEGRAM_SIZE:
+                            return True
+                
+                return False
+        else:
+            print(f"FFmpeg failed: {stderr.decode() if stderr else 'Unknown error'}")
+            return False
+            
+    except Exception as e:
+        print(f"Video compression error: {e}")
+        return False
 
 @Client.on_message(filters.regex(r"https?://(www\.)?(dropbox\.com|.*\.dl\.dropboxusercontent\.com)/.*") & filters.user(OWNER_ID))
 async def dropbox_handler(client: Client, message: Message):
@@ -19,19 +145,12 @@ async def dropbox_handler(client: Client, message: Message):
         if "?dl=0" in url:
             url = url.replace("?dl=0", "?dl=1")
         elif "?dl=1" not in url:
-            if "?" in url:
-                url += "&dl=1"
-            else:
-                url += "?dl=1"
-    
+            url += "&dl=1" if "?" in url else "?dl=1"
     elif "dl.dropboxusercontent.com" in url:
         if "?dl=1" not in url:
-            if "?" in url:
-                url += "&dl=1"
-            else:
-                url += "?dl=1"
+            url += "&dl=1" if "?" in url else "?dl=1"
 
-    status_msg = await message.reply_text("Initializing...")
+    status_msg = await message.reply_text("🚀 Initializing download...")
     
     temp_dir = f"downloads/{message.id}"
     os.makedirs(temp_dir, exist_ok=True)
@@ -39,27 +158,33 @@ async def dropbox_handler(client: Client, message: Message):
     extract_path = f"{temp_dir}/extracted"
 
     try:
-        from utils.downloader import SmartDownloader        
+        from utils.downloader import SmartDownloader
+        
+        async def download_progress(current, total):
+             if not hasattr(download_progress, 'prog'):
+                 download_progress.prog = Progress(status_msg, total, "Downloading")
+             await download_progress.prog.update(current)
+        
         downloader = SmartDownloader(
             url, 
             zip_path, 
             concurrency=16,
-            progress_callback=None
+            progress_callback=download_progress
         )
         
-        await status_msg.edit_text("Downloading with Aria2c...")
+        await status_msg.edit_text("⬇️ Downloading with Aria2c...")
         await downloader.download()
         await downloader.close()
         
-        await status_msg.edit_text("Download complete. Extracting...")
+        await status_msg.edit_text("📦 Extracting files...")
         async def extract_progress(current, total):
             if not hasattr(extract_progress, 'prog'):
-                 extract_progress.prog = Progress(status_msg, total, "Extracting")
+                extract_progress.prog = Progress(status_msg, total, "Extracting")
             await extract_progress.prog.update(current)
 
         await extract_zip(zip_path, extract_path, progress_callback=extract_progress)
         
-        await status_msg.edit_text("Extracted. Uploading to Dump Channel...")
+        await status_msg.edit_text("🔍 Scanning files...")
 
         files = []
         for root, dirs, filenames in os.walk(extract_path):
@@ -69,53 +194,91 @@ async def dropbox_handler(client: Client, message: Message):
                 files.append(os.path.join(root, filename))
 
         total_files = len(files)
+        if total_files == 0:
+            await status_msg.edit_text("⚠️ No media files found in archive.")
+            return
+            
         uploaded = 0
-        
-        upload_prog = Progress(status_msg, total_files, "Uploading Files")
+        compressed_count = 0
+        upload_prog = Progress(status_msg, total_files, "Processing & Uploading")
 
         for i, file_path in enumerate(files):
             filename = os.path.basename(file_path)
             ext = os.path.splitext(filename)[1].lower()
-            caption = f"Backup: {filename}"
-            
             file_size = os.path.getsize(file_path)
-            if file_size > 1.9 * 1024 * 1024 * 1024: # 1.9GB
-                if ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ts']:
-                    await status_msg.edit_text(f"Compressing {filename} (Size: {file_size / (1024*1024*1024):.2f} GB)...")
+            
+            upload_path = file_path
+            caption = f"📁 Backup: {filename}"
+            compressed = False
+            
+            if ext in IMAGE_FORMATS:
+                compressed_path = f"{file_path}_compressed{ext}"
+                
+                await status_msg.edit_text(
+                    f"🖼️ Compressing image ({i+1}/{total_files})\n"
+                    f"📄 {filename}\n"
+                    f"📊 Size: {file_size / (1024*1024):.2f} MB"
+                )
+                
+                if await compress_image(file_path, compressed_path):
+                    compressed_size = os.path.getsize(compressed_path)
+                    
+                    if compressed_size < file_size * 0.98:
+                        upload_path = compressed_path
+                        compressed = True
+                        compressed_count += 1
+                        caption = f"🖼️ Backup (Optimized): {filename}"
+            
+            elif ext in VIDEO_FORMATS:
+                if file_size > MAX_TELEGRAM_SIZE:
                     compressed_path = f"{file_path}_compressed.mp4"
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "ffmpeg", "-i", file_path, "-c:v", "libx264", "-crf", "28", "-preset", "fast", "-c:a", "aac", "-b:a", "128k", compressed_path,
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                        )
-                        await proc.wait()
+                    
+                    await status_msg.edit_text(
+                        f"🎬 Compressing video ({i+1}/{total_files})\n"
+                        f"📄 {filename}\n"
+                        f"📊 Original: {file_size / (1024*1024*1024):.2f} GB"
+                    )
+                    
+                    if await compress_video_h265(file_path, compressed_path, status_msg):
+                        compressed_size = os.path.getsize(compressed_path)
                         
-                        if proc.returncode == 0 and os.path.exists(compressed_path):
-                            if os.path.getsize(compressed_path) < 2 * 1024 * 1024 * 1024:
-                                file_path = compressed_path
-                                filename = os.path.basename(file_path)
-                                caption = f"Backup (Compressed): {filename}"
-                                ext = os.path.splitext(filename)[1].lower()
-                            else:
-                                print(f"Compression failed to reduce size enough for {filename}")
+                        if compressed_size < MAX_TELEGRAM_SIZE:
+                            upload_path = compressed_path
+                            compressed = True
+                            compressed_count += 1
+                            caption = f"🎬 Backup (H.265 Compressed): {os.path.basename(compressed_path)}"
+                            ext = '.mp4'
                         else:
-                            print(f"FFmpeg failed for {filename}")
-                    except Exception as e:
-                        print(f"Compression error: {e}")
+                            await status_msg.edit_text(
+                                f"⚠️ Video masih terlalu besar setelah compress: {filename}\n"
+                                f"Skipping file ini..."
+                            )
+                            if os.path.exists(compressed_path):
+                                os.remove(compressed_path)
+                            continue
+                    else:
+                        await status_msg.edit_text(
+                            f"❌ Compression gagal: {filename}\n"
+                            f"Skipping file ini..."
+                        )
+                        continue
 
-            while True:
+            max_retries = 30
+            retry_count = 0
+            
+            while retry_count < max_retries:
                 try:
-                    if ext in ['.jpg', '.jpeg', '.png', '.heic', '.webp', '.tiff', '.bmp', '.gif']:
+                    if ext in IMAGE_FORMATS:
                         await client.send_photo(
                             chat_id=DUMP_CHAT_ID,
-                            photo=file_path,
+                            photo=upload_path,
                             caption=caption,
                             progress=lambda current, total: None
                         )
-                    elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ts']:
+                    elif ext in VIDEO_FORMATS:
                         await client.send_video(
                             chat_id=DUMP_CHAT_ID,
-                            video=file_path,
+                            video=upload_path,
                             caption=caption,
                             supports_streaming=True,
                             progress=lambda current, total: None
@@ -123,36 +286,52 @@ async def dropbox_handler(client: Client, message: Message):
                     else:
                         await client.send_document(
                             chat_id=DUMP_CHAT_ID,
-                            document=file_path,
+                            document=upload_path,
                             caption=caption,
                             progress=lambda current, total: None
                         )
                     
                     uploaded += 1
                     await upload_prog.update(uploaded)
+                    break
                     
-                    if file_path.endswith("_compressed.mp4"):
-                         try:
-                             os.remove(file_path)
-                         except:
-                             pass
-                             
-                    break
-
                 except FloodWait as e:
-                    print(f"FloodWait: Sleeping for {e.value} seconds...")
+                    print(f"⏳ FloodWait: Sleeping {e.value}s...")
                     await asyncio.sleep(e.value)
+                    retry_count += 1
+                    
                 except Exception as e:
-                    print(f"Failed to upload {file_path}: {e}")
-                    break
+                    print(f"❌ Upload error for {filename}: {e}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"⚠️ Skipping {filename} after {max_retries} retries")
+                        break
+                    await asyncio.sleep(2)
+            
+            if compressed and os.path.exists(upload_path) and upload_path != file_path:
+                try:
+                    os.remove(upload_path)
+                except Exception as e:
+                    print(f"Cleanup error: {e}")
 
-        await status_msg.edit_text(f"Done! Uploaded {uploaded}/{total_files} files.")
+        await status_msg.edit_text(
+            f"✅ Upload Complete!\n\n"
+            f"📊 Statistics:\n"
+            f"• Total files: {total_files}\n"
+            f"• Uploaded: {uploaded}\n"
+            f"• Compressed: {compressed_count}\n"
+            f"• Success rate: {(uploaded/total_files)*100:.1f}%"
+        )
 
     except Exception as e:
-        await status_msg.edit_text(f"Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
         print(f"Error processing dropbox link: {e}")
+        import traceback
+        traceback.print_exc()
+        
     finally:
         try:
             shutil.rmtree(temp_dir)
+            print(f"🧹 Cleaned up {temp_dir}")
         except Exception as e:
-            print(f"Failed to cleanup {temp_dir}: {e}")
+            print(f"⚠️ Cleanup failed for {temp_dir}: {e}")

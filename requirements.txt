@@ -6,3 +6,5 @@ tgcrypto
 aiohttp
 dropbox
 psutil
+pillow
+pillow-heif
