@@ -10,7 +10,7 @@ from config import DUMP_CHAT_ID, OWNER_ID
 from utils.aerofs_helper import write_stream_to_file
 from utils.zip_helper import extract_zip
 from utils.progress import Progress
-from PIL import Image
+from PIL import Image, ImageOps
 import pillow_heif
 
 pillow_heif.register_heif_opener()
@@ -100,6 +100,64 @@ async def convert_heic_to_jpeg(input_path: str, output_path: str, quality: int =
     except Exception as e:
         print(f"HEIC convert error: {e}")
         return False
+
+async def ensure_valid_photo_dimensions(input_path: str) -> str:
+    try:
+        img = Image.open(input_path)
+
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        width, height = img.size
+        if width <= 0 or height <= 0:
+            return input_path
+
+        MAX_SIDE = 10000
+        MAX_PIXELS = 40_000_000
+
+        scale = 1.0
+
+        if width > MAX_SIDE or height > MAX_SIDE:
+            scale = min(scale, MAX_SIDE / float(max(width, height)))
+
+        if width * height > MAX_PIXELS:
+            pixel_scale = (MAX_PIXELS / float(width * height)) ** 0.5
+            if pixel_scale < scale:
+                scale = pixel_scale
+
+        if scale >= 1.0:
+            return input_path
+
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+
+        base, _ = os.path.splitext(input_path)
+        output_path = f"{base}_tgfixed.jpg"
+
+        exif_data = img.info.get('exif', None)
+        save_params = {
+            'format': 'JPEG',
+            'quality': 95,
+            'optimize': True,
+            'progressive': True,
+            'subsampling': 0,
+        }
+        if exif_data:
+            save_params['exif'] = exif_data
+
+        img.save(output_path, **save_params)
+
+        if os.path.exists(output_path):
+            return output_path
+
+        return input_path
+    except Exception as e:
+        print(f"Photo dimension fix error: {e}")
+        return input_path
 
 async def compress_video_h265(input_path: str, output_path: str, status_msg: Message = None) -> bool:
 
@@ -261,7 +319,15 @@ async def dropbox_handler(client: Client, message: Message):
                         caption = f"🖼️ Backup: {os.path.splitext(filename)[0]}{target_ext}"
                         ext = target_ext
                     else:
-                        caption = f"� Backup (Original HEIC): {filename}"
+                        caption = f"📁 Backup (Original HEIC): {filename}"
+
+                if ext in IMAGE_FORMATS:
+                    fixed_path = await ensure_valid_photo_dimensions(upload_path)
+                    if fixed_path != upload_path:
+                        upload_path = fixed_path
+                        compressed = True
+                        compressed_count += 1
+                        ext = os.path.splitext(upload_path)[1].lower()
             
             elif ext in VIDEO_FORMATS:
                 if file_size > MAX_TELEGRAM_SIZE:
@@ -297,7 +363,7 @@ async def dropbox_handler(client: Client, message: Message):
                         )
                         continue
 
-            max_retries = 30
+            max_retries = 3
             retry_count = 0
             
             while retry_count < max_retries:
