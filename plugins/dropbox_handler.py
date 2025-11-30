@@ -9,7 +9,7 @@ from utils.aerofs_helper import write_stream_to_file
 from utils.zip_helper import extract_zip
 from utils.progress import Progress
 
-@Client.on_message(filters.regex(r"https?://www\.dropbox\.com/.*") & filters.user(OWNER_ID))
+@Client.on_message(filters.regex(r"https?://(www\.)?(dropbox\.com|.*\.dl\.dropboxusercontent\.com)/.*") & filters.user(OWNER_ID))
 async def dropbox_handler(client: Client, message: Message):
     url = message.text.strip()
     
