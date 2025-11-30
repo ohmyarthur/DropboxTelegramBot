@@ -42,18 +42,16 @@ async def dropbox_handler(client: Client, message: Message):
             url, 
             zip_path, 
             concurrency=32,
-            progress_callback=lambda current: progress.update(current) if 'progress' in locals() else None
+            progress_callback=None
         )
         
-        async with aiohttp.ClientSession() as session:
-             async with session.head(url, allow_redirects=True) as response:
-                total_size = int(response.headers.get('Content-Length', 0))
-
-        progress = Progress(status_msg, total_size, "Downloading (Multi-stream)")
+        await downloader.initialize()
         
+        progress = Progress(status_msg, downloader.total_size, "Downloading (Multi-stream)")
         downloader.progress_callback = lambda current: progress.update(current)
         
         await downloader.download()
+        await downloader.close()
         
         await status_msg.edit_text("Download complete. Extracting...")
         async def extract_progress(current, total):

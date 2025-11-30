@@ -18,37 +18,63 @@ class SmartDownloader:
         self._lock = asyncio.Lock()
         self.max_retries = 3
         self.base_delay = 1.0
+        self.session = None
+        self.connector = None
+        self.user_agent = get_random_user_agent()
 
-    async def _get_size(self):
+    async def initialize(self):
+        if self.session:
+            return
+
+        self.connector = aiohttp.TCPConnector(
+            limit=self.concurrency + 4,
+            limit_per_host=self.concurrency,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True
+        )
+        
+        timeout = aiohttp.ClientTimeout(total=300, connect=30, sock_read=60)
+        self.session = aiohttp.ClientSession(connector=self.connector, timeout=timeout)
+
         headers = {
-            'User-Agent': get_random_user_agent(),
+            'User-Agent': self.user_agent,
             'Accept-Encoding': 'identity'
         }
         
-        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.head(self.url, headers=headers, allow_redirects=True) as response:
-                if response.status != 200:
-                    raise Exception(f"Failed to get file info: {response.status}")
-                return int(response.headers.get('Content-Length', 0))
+        async with self.session.head(self.url, headers=headers, allow_redirects=True) as response:
+            if response.status != 200:
+                raise Exception(f"Failed to get file info: {response.status}")
+            self.total_size = int(response.headers.get('Content-Length', 0))
 
-    async def _download_chunk_with_retry(self, session, start, end, chunk_index, retry_count=0):
-        """Download chunk with exponential backoff retry logic"""
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    async def __aenter__(self):
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def _download_chunk_with_retry(self, start, end, chunk_index, retry_count=0):
         headers = {
             'Range': f'bytes={start}-{end}',
             'Accept-Encoding': 'identity',
-            'User-Agent': get_random_user_agent()
+            'User-Agent': self.user_agent
         }
         
         try:
-            async with session.get(self.url, headers=headers) as response:
+            async with self.session.get(self.url, headers=headers, allow_redirects=True, auto_decompress=False) as response:
                 if response.status not in (200, 206):
                     if retry_count < self.max_retries:
                         delay = self.base_delay * (2 ** retry_count) + random.uniform(0, 1)
                         print(f"Chunk {chunk_index} failed (status {response.status}), retrying in {delay:.2f}s...")
                         await asyncio.sleep(delay)
-                        return await self._download_chunk_with_retry(session, start, end, chunk_index, retry_count + 1)
+                        return await self._download_chunk_with_retry(start, end, chunk_index, retry_count + 1)
                     else:
                         raise Exception(f"Failed to download chunk {chunk_index} after {self.max_retries} retries: {response.status}")
                 
@@ -72,13 +98,14 @@ class SmartDownloader:
                 delay = self.base_delay * (2 ** retry_count) + random.uniform(0, 1)
                 print(f"Chunk {chunk_index} error ({str(e)}), retrying in {delay:.2f}s...")
                 await asyncio.sleep(delay)
-                return await self._download_chunk_with_retry(session, start, end, chunk_index, retry_count + 1)
+                return await self._download_chunk_with_retry(start, end, chunk_index, retry_count + 1)
             else:
                 raise Exception(f"Failed to download chunk {chunk_index} after {self.max_retries} retries: {str(e)}")
 
     async def _download_multi_stream(self):
-        self.total_size = await self._get_size()
-        
+        if not self.session:
+            await self.initialize()
+
         async with aerofs.open(self.dest_path, 'wb') as f:
             await f.truncate(self.total_size)
 
@@ -95,57 +122,43 @@ class SmartDownloader:
         chunk_size = self.total_size // actual_concurrency
         tasks = []
         
-        connector = aiohttp.TCPConnector(
-            limit=actual_concurrency + 4,
-            limit_per_host=actual_concurrency,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=30,
-            enable_cleanup_closed=True
-        )
+        for i in range(actual_concurrency):
+            start = i * chunk_size
+            end = start + chunk_size - 1 if i < actual_concurrency - 1 else self.total_size - 1
+            tasks.append(self._download_chunk_with_retry(start, end, i))
         
-        timeout = aiohttp.ClientTimeout(total=300, connect=30, sock_read=60)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for i in range(actual_concurrency):
-                start = i * chunk_size
-                end = start + chunk_size - 1 if i < actual_concurrency - 1 else self.total_size - 1
-                tasks.append(self._download_chunk_with_retry(session, start, end, i))
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            failed_chunks = [i for i, result in enumerate(results) if isinstance(result, Exception)]
-            if failed_chunks:
-                raise Exception(f"Failed to download chunks: {failed_chunks}. Errors: {[str(results[i]) for i in failed_chunks]}")
+        failed_chunks = [i for i, result in enumerate(results) if isinstance(result, Exception)]
+        if failed_chunks:
+            raise Exception(f"Failed to download chunks: {failed_chunks}. Errors: {[str(results[i]) for i in failed_chunks]}")
 
     async def _download_simple(self):
+        if not self.session:
+            await self.initialize()
+
         headers = {
-            'User-Agent': get_random_user_agent(),
+            'User-Agent': self.user_agent,
             'Accept-Encoding': 'identity'
         }
         
-        connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300, use_dns_cache=True)
-        timeout = aiohttp.ClientTimeout(total=600, connect=60, sock_read=120)
-        
         for attempt in range(self.max_retries + 1):
             try:
-                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                    async with session.get(self.url, headers=headers) as response:
-                        if response.status != 200:
-                            raise Exception(f"Failed to download: {response.status}")
-                        
-                        self.total_size = int(response.headers.get('Content-Length', 0))
-                        self.downloaded = 0
-                        
-                        async with aerofs.open(self.dest_path, 'wb') as f:
-                            async for data in response.content.iter_chunked(self.chunk_size):
-                                await f.write(data)
-                                self.downloaded += len(data)
-                                
-                                if self.progress_callback:
-                                    await self.progress_callback(self.downloaded)
-                        
-                        return self.dest_path
+                async with self.session.get(self.url, headers=headers, allow_redirects=True, auto_decompress=False) as response:
+                    if response.status != 200:
+                        raise Exception(f"Failed to download: {response.status}")
+                    
+                    self.downloaded = 0
+                    
+                    async with aerofs.open(self.dest_path, 'wb') as f:
+                        async for data in response.content.iter_chunked(self.chunk_size):
+                            await f.write(data)
+                            self.downloaded += len(data)
+                            
+                            if self.progress_callback:
+                                await self.progress_callback(self.downloaded)
+                    
+                    return self.dest_path
                         
             except Exception as e:
                 if attempt < self.max_retries:
@@ -159,6 +172,9 @@ class SmartDownloader:
         start_time = time.time()
         
         try:
+            if not self.session:
+                await self.initialize()
+
             print(f"Starting multi-stream download with {self.concurrency} connections...")
             await self._download_multi_stream()
             download_time = time.time() - start_time
