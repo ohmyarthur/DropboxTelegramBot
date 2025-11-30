@@ -22,7 +22,10 @@ class SmartDownloader:
                 return int(response.headers.get('Content-Length', 0))
 
     async def _download_chunk(self, session, start, end):
-        headers = {'Range': f'bytes={start}-{end}'}
+        headers = {
+            'Range': f'bytes={start}-{end}',
+            'Accept-Encoding': 'identity'
+        }
         async with session.get(self.url, headers=headers) as response:
             if response.status not in (200, 206):
                 raise Exception(f"Failed to download chunk: {response.status}")
