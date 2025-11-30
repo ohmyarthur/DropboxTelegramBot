@@ -77,6 +77,8 @@ class SmartDownloader:
                                 
                                 if self.progress_callback and total > 0:
                                     await self.progress_callback(current, total)
+                    except Exception:
+                        pass
             
             if self.process.stdout.at_eof():
                 break
