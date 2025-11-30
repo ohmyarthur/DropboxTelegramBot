@@ -84,7 +84,7 @@ class SmartDownloader:
                 
                 async with aerofs.open(self.dest_path, 'r+b') as f:
                     await f.seek(start)
-                    await f.write(chunk_data)
+                    await f.write(bytes(chunk_data))
                     
                     async with self._lock:
                         self.downloaded += len(chunk_data)
