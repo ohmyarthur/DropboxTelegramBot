@@ -141,14 +141,13 @@ async def compress_video_h265(input_path: str, output_path: str, status_msg: Mes
 async def dropbox_handler(client: Client, message: Message):
     url = message.text.strip()
     
-    if "dropbox.com" in url:
-        if "?dl=0" in url:
-            url = url.replace("?dl=0", "?dl=1")
-        elif "?dl=1" not in url:
-            url += "&dl=1" if "?" in url else "?dl=1"
-    elif "dl.dropboxusercontent.com" in url:
-        if "?dl=1" not in url:
-            url += "&dl=1" if "?" in url else "?dl=1"
+    import re
+    if "dropbox.com" in url or "dropboxusercontent.com" in url:
+        url = re.sub(r'[?&]dl=[01]', '', url)
+        if '?' in url:
+            url += '&dl=1'
+        else:
+            url += '?dl=1'
 
     status_msg = await message.reply_text("🚀 Initializing download...")
     
