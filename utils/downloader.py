@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 from utils.progress import Progress
+from utils.user_agents import get_random_user_agent
 
 class SmartDownloader:
     def __init__(self, url, dest_path, progress_callback=None, concurrency=16, chunk_size=None):
@@ -37,6 +38,7 @@ class SmartDownloader:
             "--file-allocation=none",
             "--summary-interval=1",
             "--quiet=false",
+            f"--user-agent={get_random_user_agent()}",
             self.url
         ]
         
