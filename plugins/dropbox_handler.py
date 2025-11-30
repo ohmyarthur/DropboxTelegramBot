@@ -16,7 +16,8 @@ import pillow_heif
 pillow_heif.register_heif_opener()
 
 VIDEO_FORMATS = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ts', '.mpg', '.mpeg', '.m2ts', '.mts']
-IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp', '.tiff', '.tif', '.bmp', '.gif']
+IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.bmp', '.gif']
+HEIF_FORMATS = ['.heic', '.heif']
 MAX_TELEGRAM_SIZE = 1.95 * 1024 * 1024 * 1024
 IMAGE_QUALITY = 85
 VIDEO_CRF_H265 = 24
@@ -36,15 +37,15 @@ async def compress_image(input_path: str, output_path: str, max_quality: int = I
         
         file_size = os.path.getsize(input_path)
         
-        if file_size < 500 * 1024:  # < 500KB
+        if file_size < 500 * 1024:
             img.save(output_path, 'PNG', optimize=True)
         else:
             save_params = {
                 'format': 'JPEG',
                 'quality': max_quality,
                 'optimize': True,
-                'progressive': True,  # Progressive loading untuk web
-                'subsampling': 0,  # 4:4:4 chroma subsampling untuk quality maksimal
+                'progressive': True,
+                'subsampling': 0,
             }
             if exif_data:
                 save_params['exif'] = exif_data
@@ -67,6 +68,38 @@ async def compress_image(input_path: str, output_path: str, max_quality: int = I
             return True
         except:
             return False
+
+async def convert_heic_to_jpeg(input_path: str, output_path: str, quality: int = 95) -> bool:
+    try:
+        img = Image.open(input_path)
+
+        exif_data = img.info.get('exif', None)
+
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        else:
+            img = img.convert('RGB')
+
+        save_params = {
+            'format': 'JPEG',
+            'quality': quality,
+            'optimize': True,
+            'progressive': True,
+            'subsampling': 0,
+        }
+        if exif_data:
+            save_params['exif'] = exif_data
+
+        img.save(output_path, **save_params)
+
+        return os.path.exists(output_path)
+    except Exception as e:
+        print(f"HEIC convert error: {e}")
+        return False
 
 async def compress_video_h265(input_path: str, output_path: str, status_msg: Message = None) -> bool:
 
@@ -210,32 +243,25 @@ async def dropbox_handler(client: Client, message: Message):
             caption = f"📁 Backup: {filename}"
             compressed = False
             
-            if ext in IMAGE_FORMATS:
-                target_ext = ext
-                if ext in ['.heic', '.heif', '.tiff', '.tif', '.bmp']:
-                    target_ext = '.jpg'
-                
-                compressed_path = f"{file_path}_compressed{target_ext}"
-                
+            if ext in IMAGE_FORMATS or ext in HEIF_FORMATS:
                 await status_msg.edit_text(
                     f"🖼️ Processing image ({i+1}/{total_files})\n"
                     f"📄 {filename}\n"
                     f"📊 Size: {file_size / (1024*1024):.2f} MB"
                 )
                 
-                if await compress_image(file_path, compressed_path):
-                    compressed_size = os.path.getsize(compressed_path)
-                    should_use_compressed = False
-                    if ext in ['.heic', '.heif', '.tiff', '.tif', '.bmp']:
-                        should_use_compressed = True
-                    elif compressed_size < file_size * 0.98:
-                        should_use_compressed = True
-                        
-                    if should_use_compressed:
-                        upload_path = compressed_path
+                if ext in HEIF_FORMATS:
+                    target_ext = '.jpg'
+                    converted_path = f"{file_path}_converted{target_ext}"
+                    
+                    if await convert_heic_to_jpeg(file_path, converted_path):
+                        upload_path = converted_path
                         compressed = True
                         compressed_count += 1
-                        caption = f"🖼️ Backup (Optimized): {os.path.splitext(filename)[0]}{target_ext}"
+                        caption = f"🖼️ Backup: {os.path.splitext(filename)[0]}{target_ext}"
+                        ext = target_ext
+                    else:
+                        caption = f"� Backup (Original HEIC): {filename}"
             
             elif ext in VIDEO_FORMATS:
                 if file_size > MAX_TELEGRAM_SIZE:
