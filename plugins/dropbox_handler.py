@@ -25,7 +25,6 @@ VIDEO_CRF_H265 = 24
 async def compress_image(input_path: str, output_path: str, max_quality: int = IMAGE_QUALITY) -> bool:
     try:
         img = Image.open(input_path)
-        
         exif_data = img.info.get('exif', None)
         
         if img.mode in ('RGBA', 'LA', 'P'):
@@ -49,16 +48,13 @@ async def compress_image(input_path: str, output_path: str, max_quality: int = I
             }
             if exif_data:
                 save_params['exif'] = exif_data
-            
             img.save(output_path, **save_params)
         
         if os.path.exists(output_path):
             original_size = os.path.getsize(input_path)
             compressed_size = os.path.getsize(output_path)
-            
             if compressed_size >= original_size * 0.95:
                 shutil.copy2(input_path, output_path)
-            
             return True
         return False
     except Exception as e:
@@ -72,7 +68,6 @@ async def compress_image(input_path: str, output_path: str, max_quality: int = I
 async def convert_heic_to_jpeg(input_path: str, output_path: str, quality: int = 95) -> bool:
     try:
         img = Image.open(input_path)
-
         exif_data = img.info.get('exif', None)
 
         if img.mode in ('RGBA', 'LA', 'P'):
@@ -93,9 +88,7 @@ async def convert_heic_to_jpeg(input_path: str, output_path: str, quality: int =
         }
         if exif_data:
             save_params['exif'] = exif_data
-
         img.save(output_path, **save_params)
-
         return os.path.exists(output_path)
     except Exception as e:
         print(f"HEIC convert error: {e}")
@@ -104,7 +97,6 @@ async def convert_heic_to_jpeg(input_path: str, output_path: str, quality: int =
 async def ensure_valid_photo_dimensions(input_path: str) -> str:
     try:
         img = Image.open(input_path)
-
         try:
             img = ImageOps.exif_transpose(img)
         except Exception:
@@ -116,7 +108,6 @@ async def ensure_valid_photo_dimensions(input_path: str) -> str:
 
         MAX_SIDE = 10000
         MAX_PIXELS = 40_000_000
-
         scale = 1.0
 
         if width > MAX_SIDE or height > MAX_SIDE:
@@ -132,7 +123,6 @@ async def ensure_valid_photo_dimensions(input_path: str) -> str:
 
         new_width = max(1, int(width * scale))
         new_height = max(1, int(height * scale))
-
         img = img.resize((new_width, new_height), Image.LANCZOS)
 
         base, _ = os.path.splitext(input_path)
@@ -148,19 +138,16 @@ async def ensure_valid_photo_dimensions(input_path: str) -> str:
         }
         if exif_data:
             save_params['exif'] = exif_data
-
         img.save(output_path, **save_params)
 
         if os.path.exists(output_path):
             return output_path
-
         return input_path
     except Exception as e:
         print(f"Photo dimension fix error: {e}")
         return input_path
 
 async def compress_video_h265(input_path: str, output_path: str, status_msg: Message = None) -> bool:
-
     try:
         if status_msg:
             await status_msg.edit_text(f"🎬 Compressing video with H.265/HEVC (Near-Lossless Quality)...")
@@ -206,24 +193,20 @@ async def compress_video_h265(input_path: str, output_path: str, status_msg: Mes
                     if status_msg:
                         await status_msg.edit_text(f"🔄 File still too large, trying higher compression...")
                     cmd[7] = "28"
-                    
                     proc2 = await asyncio.create_subprocess_exec(
                         *cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
                     await proc2.wait()
-                    
                     if proc2.returncode == 0 and os.path.exists(output_path):
                         output_size2 = os.path.getsize(output_path)
                         if output_size2 < MAX_TELEGRAM_SIZE:
                             return True
-                
                 return False
         else:
             print(f"FFmpeg failed: {stderr.decode() if stderr else 'Unknown error'}")
             return False
-            
     except Exception as e:
         print(f"Video compression error: {e}")
         return False
@@ -311,7 +294,6 @@ async def dropbox_handler(client: Client, message: Message):
                 if ext in HEIF_FORMATS:
                     target_ext = '.jpg'
                     converted_path = f"{file_path}_converted{target_ext}"
-                    
                     if await convert_heic_to_jpeg(file_path, converted_path):
                         upload_path = converted_path
                         compressed = True
@@ -332,16 +314,13 @@ async def dropbox_handler(client: Client, message: Message):
             elif ext in VIDEO_FORMATS:
                 if file_size > MAX_TELEGRAM_SIZE:
                     compressed_path = f"{file_path}_compressed.mp4"
-                    
                     await status_msg.edit_text(
                         f"🎬 Compressing video ({i+1}/{total_files})\n"
                         f"📄 {filename}\n"
                         f"📊 Original: {file_size / (1024*1024*1024):.2f} GB"
                     )
-                    
                     if await compress_video_h265(file_path, compressed_path, status_msg):
                         compressed_size = os.path.getsize(compressed_path)
-                        
                         if compressed_size < MAX_TELEGRAM_SIZE:
                             upload_path = compressed_path
                             compressed = True
