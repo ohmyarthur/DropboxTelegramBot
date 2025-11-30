@@ -41,15 +41,11 @@ async def dropbox_handler(client: Client, message: Message):
         downloader = SmartDownloader(
             url, 
             zip_path, 
-            concurrency=32,
+            concurrency=16,
             progress_callback=None
         )
         
-        await downloader.initialize()
-        
-        progress = Progress(status_msg, downloader.total_size, "Downloading (Multi-stream)")
-        downloader.progress_callback = lambda current: progress.update(current)
-        
+        await status_msg.edit_text("Downloading with Aria2c...")
         await downloader.download()
         await downloader.close()
         
