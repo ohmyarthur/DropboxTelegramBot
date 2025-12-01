@@ -3,13 +3,14 @@ import shutil
 import time
 import aiohttp
 from pyrogram import Client, filters
-from pyrogram.types import Message, InputMediaPhoto
+from pyrogram.types import Message, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 import asyncio
 from config import DUMP_CHAT_ID, OWNER_ID
 from utils.aerofs_helper import write_stream_to_file
 from utils.zip_helper import extract_zip
 from utils.progress import Progress
+from utils.session_manager import session_manager
 from PIL import Image, ImageOps
 import pillow_heif
 
@@ -18,6 +19,8 @@ pillow_heif.register_heif_opener()
 VIDEO_FORMATS = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ts', '.mpg', '.mpeg', '.m2ts', '.mts']
 IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.bmp', '.gif']
 HEIF_FORMATS = ['.heic', '.heif']
+GIF_FORMATS = ['.gif']
+DOCUMENT_FORMATS = ['.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.7z']
 MAX_TELEGRAM_SIZE = 1.95 * 1024 * 1024 * 1024
 IMAGE_QUALITY = 85
 VIDEO_CRF_H265 = 24
@@ -211,6 +214,79 @@ async def compress_video_h265(input_path: str, output_path: str, status_msg: Mes
         print(f"Video compression error: {e}")
         return False
 
+def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Select Media Types", callback_data=f"media_menu:{user_id}")],
+        [InlineKeyboardButton("📤 Select Dump Channel", callback_data=f"channel_menu:{user_id}")],
+        [InlineKeyboardButton("⚙️ Settings Summary", callback_data=f"settings:{user_id}")],
+        [InlineKeyboardButton("✅ Start Download", callback_data=f"download_start:{user_id}")]
+    ])
+
+def get_media_selection_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    photos_enabled = session_manager.is_media_type_enabled(user_id, 'photos')
+    videos_enabled = session_manager.is_media_type_enabled(user_id, 'videos')
+    gifs_enabled = session_manager.is_media_type_enabled(user_id, 'gifs')
+    docs_enabled = session_manager.is_media_type_enabled(user_id, 'documents')
+    other_enabled = session_manager.is_media_type_enabled(user_id, 'other')
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if photos_enabled else '❌'} Photos", 
+            callback_data=f"media_toggle:photos:{user_id}"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if videos_enabled else '❌'} Videos", 
+            callback_data=f"media_toggle:videos:{user_id}"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if gifs_enabled else '❌'} GIFs", 
+            callback_data=f"media_toggle:gifs:{user_id}"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if docs_enabled else '❌'} Documents", 
+            callback_data=f"media_toggle:documents:{user_id}"
+        )],
+        [InlineKeyboardButton(
+            f"{'✅' if other_enabled else '❌'} Other Files", 
+            callback_data=f"media_toggle:other:{user_id}"
+        )],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=f"main_menu:{user_id}")]
+    ])
+
+def get_channel_selection_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current_channel = session_manager.get_dump_channel(user_id)
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Use Default Channel", callback_data=f"channel_default:{user_id}")],
+        [InlineKeyboardButton("✏️ Enter Custom Channel ID", callback_data=f"channel_custom:{user_id}")],
+        [InlineKeyboardButton(f"Current: {current_channel}", callback_data=f"noop:{user_id}")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=f"main_menu:{user_id}")]
+    ])
+
+def should_process_file(filename: str, selected_types: set, ext: str) -> bool:
+    ext_lower = ext.lower()
+    
+    if 'photos' in selected_types and (ext_lower in IMAGE_FORMATS or ext_lower in HEIF_FORMATS):
+        if ext_lower in GIF_FORMATS and 'gifs' not in selected_types:
+            return False
+        return True
+    
+    if 'videos' in selected_types and ext_lower in VIDEO_FORMATS:
+        return True
+    
+    if 'gifs' in selected_types and ext_lower in GIF_FORMATS:
+        return True
+    
+    if 'documents' in selected_types and ext_lower in DOCUMENT_FORMATS:
+        return True
+    
+    if 'other' in selected_types:
+        if (ext_lower not in IMAGE_FORMATS and ext_lower not in HEIF_FORMATS and
+            ext_lower not in VIDEO_FORMATS and ext_lower not in DOCUMENT_FORMATS):
+            return True
+    
+    return False
+
 @Client.on_message(filters.regex(r"https?://(www\.)?(dropbox\.com|.*\.dl\.dropboxusercontent\.com)/.*") & filters.user(OWNER_ID))
 async def dropbox_handler(client: Client, message: Message):
     url = message.text.strip()
@@ -223,9 +299,224 @@ async def dropbox_handler(client: Client, message: Message):
         else:
             url += '?dl=1'
 
-    status_msg = await message.reply_text("🚀 Initializing download...")
+    session_manager.create_session(message.from_user.id, url)
     
-    temp_dir = f"downloads/{message.id}"
+    await message.reply_text(
+        "🎯 **Dropbox Download Configuration**\n\n"
+        f"📎 Link: `{url[:50]}...`\n\n"
+        "Please select your preferences:",
+        reply_markup=get_main_menu_keyboard(message.from_user.id)
+    )
+
+@Client.on_callback_query(filters.regex(r"^main_menu:") & filters.user(OWNER_ID))
+async def main_menu_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    session = session_manager.get_session(user_id)
+    if not session:
+        await callback.answer("❌ Session expired. Please send the link again.", show_alert=True)
+        return
+    
+    url = session['url']
+    await callback.edit_message_text(
+        "🎯 **Dropbox Download Configuration**\n\n"
+        f"📎 Link: `{url[:50]}...`\n\n"
+        "Please select your preferences:",
+        reply_markup=get_main_menu_keyboard(user_id)
+    )
+    await callback.answer()
+
+@Client.on_callback_query(filters.regex(r"^media_menu:") & filters.user(OWNER_ID))
+async def media_menu_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    await callback.edit_message_text(
+        "📂 **Select Media Types to Download**\n\n"
+        "Toggle the types you want to download:",
+        reply_markup=get_media_selection_keyboard(user_id)
+    )
+    await callback.answer()
+
+@Client.on_callback_query(filters.regex(r"^media_toggle:") & filters.user(OWNER_ID))
+async def media_toggle_callback(client: Client, callback: CallbackQuery):
+    parts = callback.data.split(":")
+    media_type = parts[1]
+    user_id = int(parts[2])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    new_state = session_manager.toggle_media_type(user_id, media_type)
+    
+    await callback.edit_message_reply_markup(
+        reply_markup=get_media_selection_keyboard(user_id)
+    )
+    
+    status = "enabled" if new_state else "disabled"
+    await callback.answer(f"✓ {media_type.capitalize()} {status}")
+
+@Client.on_callback_query(filters.regex(r"^channel_menu:") & filters.user(OWNER_ID))
+async def channel_menu_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    await callback.edit_message_text(
+        "📤 **Select Dump Channel**\n\n"
+        "Choose where to upload the files:",
+        reply_markup=get_channel_selection_keyboard(user_id)
+    )
+    await callback.answer()
+
+@Client.on_callback_query(filters.regex(r"^channel_default:") & filters.user(OWNER_ID))
+async def channel_default_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    session_manager.set_dump_channel(user_id, DUMP_CHAT_ID)
+    
+    await callback.edit_message_reply_markup(
+        reply_markup=get_channel_selection_keyboard(user_id)
+    )
+    await callback.answer(f"✓ Set to default channel: {DUMP_CHAT_ID}")
+
+@Client.on_callback_query(filters.regex(r"^channel_custom:") & filters.user(OWNER_ID))
+async def channel_custom_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    session_manager.set_awaiting_channel_input(user_id, True)
+    
+    await callback.answer("Please send the channel ID (e.g., -1001234567890)", show_alert=True)
+    await callback.message.reply_text(
+        "✏️ **Enter Custom Channel ID**\n\n"
+        "Please send the channel ID in the format:\n"
+        "`-1001234567890`\n\n"
+        "Or send /cancel to go back."
+    )
+
+@Client.on_message(filters.text & filters.user(OWNER_ID) & ~filters.command("start"))
+async def handle_channel_input(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if not session_manager.is_awaiting_channel_input(user_id):
+        return
+    
+    if message.text == "/cancel":
+        session_manager.set_awaiting_channel_input(user_id, False)
+        await message.reply_text(
+            "❌ Cancelled.",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+        return
+    
+    try:
+        channel_id = int(message.text.strip())
+        session_manager.set_dump_channel(user_id, channel_id)
+        session_manager.set_awaiting_channel_input(user_id, False)
+        
+        await message.reply_text(
+            f"✅ Dump channel set to: `{channel_id}`",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+    except ValueError:
+        await message.reply_text(
+            "❌ Invalid channel ID. Please send a valid number like `-1001234567890`\n\n"
+            "Or send /cancel to go back."
+        )
+
+@Client.on_callback_query(filters.regex(r"^settings:") & filters.user(OWNER_ID))
+async def settings_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    session = session_manager.get_session(user_id)
+    if not session:
+        await callback.answer("❌ Session expired!", show_alert=True)
+        return
+    
+    media_types = session['media_types']
+    dump_channel = session['dump_channel']
+    url = session['url']
+    
+    media_list = []
+    if 'photos' in media_types:
+        media_list.append("✅ Photos")
+    if 'videos' in media_types:
+        media_list.append("✅ Videos")
+    if 'gifs' in media_types:
+        media_list.append("✅ GIFs")
+    if 'documents' in media_types:
+        media_list.append("✅ Documents")
+    if 'other' in media_types:
+        media_list.append("✅ Other Files")
+    
+    if not media_list:
+        media_list.append("❌ No media types selected!")
+    
+    settings_text = (
+        "⚙️ **Current Settings**\n\n"
+        f"📎 **URL:** `{url[:40]}...`\n\n"
+        f"📂 **Media Types:**\n" + "\n".join(media_list) + "\n\n"
+        f"📤 **Dump Channel:** `{dump_channel}`"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=f"main_menu:{user_id}")]
+    ])
+    
+    await callback.edit_message_text(settings_text, reply_markup=keyboard)
+    await callback.answer()
+
+@Client.on_callback_query(filters.regex(r"^download_start:") & filters.user(OWNER_ID))
+async def download_start_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ This is not your session!", show_alert=True)
+        return
+    
+    session = session_manager.get_session(user_id)
+    if not session:
+        await callback.answer("❌ Session expired!", show_alert=True)
+        return
+    
+    media_types = session['media_types']
+    if not media_types:
+        await callback.answer("❌ Please select at least one media type!", show_alert=True)
+        return
+    
+    url = session['url']
+    dump_channel = session['dump_channel']
+    
+    await callback.answer("🚀 Starting download...")
+    
+    await callback.edit_message_text("🚀 Initializing download...")
+    
+    await process_download(client, callback.message, url, dump_channel, media_types, user_id)
+
+async def process_download(client: Client, status_msg: Message, url: str, dump_channel: int, media_types: set, user_id: int):
+    temp_dir = f"downloads/{status_msg.id}"
     os.makedirs(temp_dir, exist_ok=True)
     zip_path = f"{temp_dir}/download.zip"
     extract_path = f"{temp_dir}/extracted"
@@ -264,11 +555,17 @@ async def dropbox_handler(client: Client, message: Message):
             for filename in filenames:
                 if filename.lower().endswith('.json'):
                     continue
-                files.append(os.path.join(root, filename))
+                
+                file_path = os.path.join(root, filename)
+                ext = os.path.splitext(filename)[1].lower()
+                
+                if should_process_file(filename, media_types, ext):
+                    files.append(file_path)
 
         total_files = len(files)
         if total_files == 0:
-            await status_msg.edit_text("⚠️ No media files found in archive.")
+            await status_msg.edit_text("⚠️ No matching media files found in archive.")
+            session_manager.delete_session(user_id)
             return
             
         uploaded = 0
@@ -297,7 +594,7 @@ async def dropbox_handler(client: Client, message: Message):
                         )
 
                     await client.send_media_group(
-                        chat_id=DUMP_CHAT_ID,
+                        chat_id=dump_channel,
                         media=media_group
                     )
 
@@ -417,7 +714,7 @@ async def dropbox_handler(client: Client, message: Message):
                 try:
                     if ext in VIDEO_FORMATS:
                         await client.send_video(
-                            chat_id=DUMP_CHAT_ID,
+                            chat_id=dump_channel,
                             video=upload_path,
                             caption=caption,
                             supports_streaming=True,
@@ -425,7 +722,7 @@ async def dropbox_handler(client: Client, message: Message):
                         )
                     else:
                         await client.send_document(
-                            chat_id=DUMP_CHAT_ID,
+                            chat_id=dump_channel,
                             document=upload_path,
                             caption=caption,
                             progress=lambda current, total: None
@@ -465,12 +762,15 @@ async def dropbox_handler(client: Client, message: Message):
             f"• Compressed: {compressed_count}\n"
             f"• Success rate: {(uploaded/total_files)*100:.1f}%"
         )
+        
+        session_manager.delete_session(user_id)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {str(e)}")
         print(f"Error processing dropbox link: {e}")
         import traceback
         traceback.print_exc()
+        session_manager.delete_session(user_id)
         
     finally:
         try:
@@ -478,3 +778,7 @@ async def dropbox_handler(client: Client, message: Message):
             print(f"🧹 Cleaned up {temp_dir}")
         except Exception as e:
             print(f"⚠️ Cleanup failed for {temp_dir}: {e}")
+
+@Client.on_callback_query(filters.regex(r"^noop:"))
+async def noop_callback(client: Client, callback: CallbackQuery):
+    await callback.answer()
