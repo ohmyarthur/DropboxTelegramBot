@@ -3,6 +3,7 @@ import os
 import time
 import aiohttp
 import aerofs
+import zipfile
 from utils.progress import Progress
 from utils.user_agents import get_random_user_agent
 
@@ -32,13 +33,32 @@ class SmartDownloader:
     async def download(self):
         try:
             await self._download_aria2c()
+            self._validate_download()
         except Exception as e:
             error_msg = str(e)
-            if "403" in error_msg or "errorCode=22" in error_msg:
-                print(f"⚠️ Aria2c failed with 403, falling back to aiohttp...")
+            if "403" in error_msg or "errorCode=22" in error_msg or "not a zip file" in error_msg.lower():
+                print(f"⚠️ Aria2c failed ({error_msg[:50]}...), falling back to aiohttp...")
                 await self._download_aiohttp()
+                self._validate_download()
             else:
                 raise
+    
+    def _validate_download(self):
+        if not os.path.exists(self.dest_path):
+            raise Exception("Downloaded file not found")
+        
+        file_size = os.path.getsize(self.dest_path)
+        if file_size < 100:
+            with open(self.dest_path, 'rb') as f:
+                content = f.read()
+                if b'<html' in content.lower() or b'<!doctype' in content.lower():
+                    raise Exception("Downloaded file is HTML, not a ZIP file. Dropbox may have returned an error page.")
+        
+        try:
+            with zipfile.ZipFile(self.dest_path, 'r') as zf:
+                _ = zf.namelist()
+        except zipfile.BadZipFile:
+            raise Exception("Downloaded file is not a valid ZIP file. The link may be expired or invalid.")
     
     async def _download_aria2c(self):
         start_time = time.time()
