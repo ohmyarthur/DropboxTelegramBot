@@ -532,11 +532,11 @@ async def process_download(client: Client, status_msg: Message, url: str, dump_c
         downloader = SmartDownloader(
             url, 
             zip_path, 
-            concurrency=16,
+            concurrency=4,  # Reduced for Dropbox compatibility
             progress_callback=download_progress
         )
         
-        await status_msg.edit_text("⬇️ Downloading with Aria2c...")
+        await status_msg.edit_text("⬇️ Downloading (with fallback support)...")
         await downloader.download()
         await downloader.close()
         

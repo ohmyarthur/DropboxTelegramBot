@@ -1,18 +1,22 @@
 import asyncio
 import os
 import time
+import aiohttp
+import aerofs
 from utils.progress import Progress
 from utils.user_agents import get_random_user_agent
 
 class SmartDownloader:
-    def __init__(self, url, dest_path, progress_callback=None, concurrency=16, chunk_size=None):
+    def __init__(self, url, dest_path, progress_callback=None, concurrency=4, chunk_size=1024*1024):
         self.url = url
         self.dest_path = dest_path
         self.progress_callback = progress_callback
         self.concurrency = concurrency
+        self.chunk_size = chunk_size
         self.total_size = 0
         self.downloaded = 0
         self.process = None
+        self._lock = asyncio.Lock()
 
     async def initialize(self):
         pass
@@ -26,6 +30,17 @@ class SmartDownloader:
                 pass
 
     async def download(self):
+        try:
+            await self._download_aria2c()
+        except Exception as e:
+            error_msg = str(e)
+            if "403" in error_msg or "errorCode=22" in error_msg:
+                print(f"⚠️ Aria2c failed with 403, falling back to aiohttp...")
+                await self._download_aiohttp()
+            else:
+                raise
+    
+    async def _download_aria2c(self):
         start_time = time.time()
         
         user_agent = get_random_user_agent()
@@ -145,5 +160,49 @@ class SmartDownloader:
         download_time = time.time() - start_time
         speed = (self.total_size / (1024 * 1024)) / download_time if download_time > 0 else 0
         print(f"Aria2c download completed in {download_time:.2f}s ({speed:.2f} MB/s)")
+        
+        return self.dest_path
+    
+    async def _download_aiohttp(self):
+        start_time = time.time()
+        user_agent = get_random_user_agent()
+        
+        headers = {
+            'User-Agent': user_agent,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'identity',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.dropbox.com/',
+        }
+        
+        print(f"Starting aiohttp download (single stream, Dropbox-friendly)...")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(self.url, headers=headers) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP error {response.status}: {response.reason}")
+                
+                self.total_size = int(response.headers.get('Content-Length', 0))
+                self.downloaded = 0
+                
+                async with aerofs.open(self.dest_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(self.chunk_size):
+                        await f.write(chunk)
+                        self.downloaded += len(chunk)
+                        
+                        if self.progress_callback and self.total_size > 0:
+                            await self.progress_callback(self.downloaded, self.total_size)
+        
+        if os.path.exists(self.dest_path):
+            actual_size = os.path.getsize(self.dest_path)
+            if self.progress_callback:
+                await self.progress_callback(actual_size, actual_size)
+        else:
+            raise Exception("Download finished but file not found")
+        
+        download_time = time.time() - start_time
+        speed = (self.total_size / (1024 * 1024)) / download_time if download_time > 0 else 0
+        print(f"Aiohttp download completed in {download_time:.2f}s ({speed:.2f} MB/s)")
         
         return self.dest_path
